@@ -15,7 +15,8 @@ const client_secret = process.env.QUICKBOOKS_CLIENT_SECRET;
 const refresh_token = process.env.QUICKBOOKS_REFRESH_TOKEN;
 const realm_id = process.env.QUICKBOOKS_REALM_ID;
 const environment = process.env.QUICKBOOKS_ENVIRONMENT || 'sandbox';
-const redirect_uri = 'http://localhost:8000/callback';
+// Fix for Issue #5: Use env var with underscore (QUICKBOOKS_REDIRECT_URI)
+const redirect_uri = process.env.QUICKBOOKS_REDIRECT_URI || 'http://localhost:8000/callback';
 
 // Only throw error if client_id or client_secret is missing
 if (!client_id || !client_secret || !redirect_uri) {
