@@ -1,12 +1,15 @@
 import dotenv from "dotenv";
 import QuickBooks from "node-quickbooks";
 import OAuthClient from "intuit-oauth";
-import http from 'http';
-import fs from 'fs';
-import path from 'path';
-import { fileURLToPath } from 'url';
-import open from 'open';
-import { getCurrentAccessToken } from "./auth-context.js";
+import http from "http";
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
+import open from "open";
+import {
+  getCurrentAccessToken,
+  getOptionalAccessToken,
+} from "./auth-context.js";
 
 dotenv.config();
 
@@ -14,18 +17,17 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const client_id = process.env.QUICKBOOKS_CLIENT_ID;
 const client_secret = process.env.QUICKBOOKS_CLIENT_SECRET;
 const refresh_token = process.env.QUICKBOOKS_REFRESH_TOKEN;
-const realm_id = process.env.QUICKBOOKS_REALM_ID;
-const environment = process.env.QUICKBOOKS_ENVIRONMENT || 'sandbox';
-const isSandbox = environment === 'sandbox';
+const configuredRealmId = process.env.QUICKBOOKS_REALM_ID;
+const environment = process.env.QUICKBOOKS_ENVIRONMENT || "sandbox";
+const isSandbox = environment === "sandbox";
 // Fix for Issue #5: Use env var with underscore (QUICKBOOKS_REDIRECT_URI)
-const redirect_uri = process.env.QUICKBOOKS_REDIRECT_URI || 'http://localhost:8000/callback';
+const redirect_uri =
+  process.env.QUICKBOOKS_REDIRECT_URI || "http://localhost:8000/callback";
 
-const isHttpTransport = process.env.MCP_TRANSPORT === 'streamable-http';
-
-// Only require client credentials for stdio mode (HTTP mode receives tokens via Authorization header)
-if (!isHttpTransport && (!client_id || !client_secret || !redirect_uri)) {
-  throw Error("Client ID, Client Secret and Redirect URI must be set in environment variables");
-}
+const hasOAuthClientConfig = Boolean(
+  client_id && client_secret && redirect_uri,
+);
+const hasRefreshTokenConfig = Boolean(refresh_token && configuredRealmId);
 
 class QuickbooksClient {
   private readonly clientId: string;
@@ -73,18 +75,18 @@ class QuickbooksClient {
     return new Promise((resolve, reject) => {
       // Create temporary server for OAuth callback
       const server = http.createServer(async (req, res) => {
-        if (req.url?.startsWith('/callback')) {
+        if (req.url?.startsWith("/callback")) {
           try {
             const response = await this.oauthClient.createToken(req.url);
             const tokens = response.token;
-            
+
             // Save tokens
             this.refreshToken = tokens.refresh_token;
             this.realmId = tokens.realmId;
             this.saveTokensToEnv();
-            
+
             // Send success response
-            res.writeHead(200, { 'Content-Type': 'text/html' });
+            res.writeHead(200, { "Content-Type": "text/html" });
             res.end(`
               <html>
                 <body style="
@@ -102,7 +104,7 @@ class QuickbooksClient {
                 </body>
               </html>
             `);
-            
+
             // Close server after a short delay
             setTimeout(() => {
               server.close();
@@ -110,8 +112,8 @@ class QuickbooksClient {
               resolve();
             }, 1000);
           } catch (error) {
-            console.error('Error during token creation:', error);
-            res.writeHead(500, { 'Content-Type': 'text/html' });
+            console.error("Error during token creation:", error);
+            res.writeHead(500, { "Content-Type": "text/html" });
             res.end(`
               <html>
                 <body style="
@@ -137,20 +139,21 @@ class QuickbooksClient {
 
       // Start server
       server.listen(port, async () => {
-        
         // Generate authorization URL with proper type assertion
-        const authUri = this.oauthClient.authorizeUri({
-          scope: [OAuthClient.scopes.Accounting as string],
-          state: 'testState'
-        }).toString();
-        
+        const authUri = this.oauthClient
+          .authorizeUri({
+            scope: [OAuthClient.scopes.Accounting as string],
+            state: "testState",
+          })
+          .toString();
+
         // Open browser automatically
         await open(authUri);
       });
 
       // Handle server errors
-      server.on('error', (error) => {
-        console.error('Server error:', error);
+      server.on("error", (error) => {
+        console.error("Server error:", error);
         this.isAuthenticating = false;
         reject(error);
       });
@@ -158,12 +161,12 @@ class QuickbooksClient {
   }
 
   private saveTokensToEnv(): void {
-    const tokenPath = path.join(__dirname, '..', '..', '.env');
-    const envContent = fs.readFileSync(tokenPath, 'utf-8');
-    const envLines = envContent.split('\n');
-    
+    const tokenPath = path.join(__dirname, "..", "..", ".env");
+    const envContent = fs.readFileSync(tokenPath, "utf-8");
+    const envLines = envContent.split("\n");
+
     const updateEnvVar = (name: string, value: string) => {
-      const index = envLines.findIndex(line => line.startsWith(`${name}=`));
+      const index = envLines.findIndex((line) => line.startsWith(`${name}=`));
       if (index !== -1) {
         envLines[index] = `${name}=${value}`;
       } else {
@@ -171,32 +174,35 @@ class QuickbooksClient {
       }
     };
 
-    if (this.refreshToken) updateEnvVar('QUICKBOOKS_REFRESH_TOKEN', this.refreshToken);
-    if (this.realmId) updateEnvVar('QUICKBOOKS_REALM_ID', this.realmId);
+    if (this.refreshToken)
+      updateEnvVar("QUICKBOOKS_REFRESH_TOKEN", this.refreshToken);
+    if (this.realmId) updateEnvVar("QUICKBOOKS_REALM_ID", this.realmId);
 
-    fs.writeFileSync(tokenPath, envLines.join('\n'));
+    fs.writeFileSync(tokenPath, envLines.join("\n"));
   }
 
   async refreshAccessToken() {
     if (!this.refreshToken) {
       await this.startOAuthFlow();
-      
+
       // Verify we have a refresh token after OAuth flow
       if (!this.refreshToken) {
-        throw new Error('Failed to obtain refresh token from OAuth flow');
+        throw new Error("Failed to obtain refresh token from OAuth flow");
       }
     }
 
     try {
       // At this point we know refreshToken is not undefined
-      const authResponse = await this.oauthClient.refreshUsingToken(this.refreshToken);
-      
+      const authResponse = await this.oauthClient.refreshUsingToken(
+        this.refreshToken,
+      );
+
       this.accessToken = authResponse.token.access_token;
-      
+
       // Calculate expiry time
       const expiresIn = authResponse.token.expires_in || 3600; // Default to 1 hour
       this.accessTokenExpiry = new Date(Date.now() + expiresIn * 1000);
-      
+
       return {
         access_token: this.accessToken,
         expires_in: expiresIn,
@@ -209,20 +215,24 @@ class QuickbooksClient {
   async authenticate() {
     if (!this.refreshToken || !this.realmId) {
       await this.startOAuthFlow();
-      
+
       // Verify we have both tokens after OAuth flow
       if (!this.refreshToken || !this.realmId) {
-        throw new Error('Failed to obtain required tokens from OAuth flow');
+        throw new Error("Failed to obtain required tokens from OAuth flow");
       }
     }
 
     // Check if token exists and is still valid
     const now = new Date();
-    if (!this.accessToken || !this.accessTokenExpiry || this.accessTokenExpiry <= now) {
+    if (
+      !this.accessToken ||
+      !this.accessTokenExpiry ||
+      this.accessTokenExpiry <= now
+    ) {
       const tokenResponse = await this.refreshAccessToken();
       this.accessToken = tokenResponse.access_token;
     }
-    
+
     // At this point we know all tokens are available
     this.quickbooksInstance = new QuickBooks(
       this.clientId,
@@ -230,38 +240,40 @@ class QuickbooksClient {
       this.accessToken,
       false, // no token secret for OAuth 2.0
       this.realmId!, // Safe to use ! here as we checked above
-      this.environment === 'sandbox', // use the sandbox?
+      this.environment === "sandbox", // use the sandbox?
       false, // debug?
       null, // minor version
-      '2.0', // oauth version
-      this.refreshToken
+      "2.0", // oauth version
+      this.refreshToken,
     );
-    
+
     return this.quickbooksInstance;
   }
-  
+
   getQuickbooks() {
     if (!this.quickbooksInstance) {
-      throw new Error('Quickbooks not authenticated. Call authenticate() first');
+      throw new Error(
+        "Quickbooks not authenticated. Call authenticate() first",
+      );
     }
     return this.quickbooksInstance;
   }
 }
 
-// Singleton for stdio mode (not created in HTTP mode where OAuth is handled externally)
-const stdioClient = !isHttpTransport
+// Env-backed client for local stdio mode and single-tenant HTTP deployments.
+const envBackedClient = hasOAuthClientConfig
   ? new QuickbooksClient({
       clientId: client_id!,
       clientSecret: client_secret!,
       refreshToken: refresh_token,
-      realmId: realm_id,
+      realmId: configuredRealmId,
       environment: environment,
       redirectUri: redirect_uri,
     })
   : null;
 
-// Legacy export for auth-server.ts (only valid in stdio mode)
-export const quickbooksClient = stdioClient as QuickbooksClient;
+// Legacy export for auth-server.ts local OAuth bootstrap flow.
+export const quickbooksClient = envBackedClient as QuickbooksClient;
 
 /**
  * Creates a per-request QuickBooks client using the provided access token.
@@ -270,17 +282,23 @@ export const quickbooksClient = stdioClient as QuickbooksClient;
  */
 export function createQuickBooksClient(accessToken?: string): QuickBooks {
   const token = accessToken || getCurrentAccessToken();
+  if (!configuredRealmId) {
+    throw new Error(
+      "QUICKBOOKS_REALM_ID must be set when using HTTP bearer-token mode",
+    );
+  }
+
   return new QuickBooks(
-    "",          // clientId — not needed, OAuth handled externally
-    "",          // clientSecret — not needed
-    token,       // access token from Authorization header
-    false,       // no token secret (OAuth 2.0)
-    realm_id || "",
+    client_id || "",
+    client_secret || "",
+    token, // access token from Authorization header
+    false, // no token secret (OAuth 2.0)
+    configuredRealmId,
     isSandbox,
-    false,       // debug
-    null,        // minor version
-    "2.0",       // oauth version
-    ""           // refresh token — not needed, handled externally
+    false, // debug
+    null, // minor version
+    "2.0", // oauth version
+    refresh_token || "",
   );
 }
 
@@ -290,9 +308,26 @@ export function createQuickBooksClient(accessToken?: string): QuickBooks {
  * - streamable-http mode: creates a per-request client with the injected access token
  */
 export async function getQuickbooks(): Promise<QuickBooks> {
-  if (isHttpTransport) {
-    return createQuickBooksClient();
+  const accessToken = getOptionalAccessToken();
+  if (accessToken) {
+    return createQuickBooksClient(accessToken);
   }
-  await stdioClient!.authenticate();
-  return stdioClient!.getQuickbooks();
+
+  if (!envBackedClient) {
+    throw new Error(
+      "QuickBooks client credentials are missing from the environment",
+    );
+  }
+
+  if (
+    process.env.MCP_TRANSPORT === "streamable-http" &&
+    !hasRefreshTokenConfig
+  ) {
+    throw new Error(
+      "HTTP fallback mode requires QUICKBOOKS_REFRESH_TOKEN and QUICKBOOKS_REALM_ID in the environment",
+    );
+  }
+
+  await envBackedClient.authenticate();
+  return envBackedClient.getQuickbooks();
 }

@@ -2,11 +2,11 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { QuickbooksMCPServer, createMcpServer } from "./server/qbo-mcp-server.js";
+import { pathToFileURL } from "node:url";
+import { QuickbooksMCPServer } from "./server/qbo-mcp-server.js";
 import { RegisterTool } from "./helpers/register-tool.js";
-import { authStorage } from "./clients/auth-context.js";
 import http from "node:http";
+import { handleStreamableHttpRequest } from "./server/streamable-http-handler.js";
 
 // import { ListInvoicesTool } from "./tools/list-invoices.tool.js";
 // import { CreateCustomerTool } from "./tools/create-customer.tool.js";
@@ -202,7 +202,7 @@ import { GetAgedPayablesTool } from "./tools/get-aged-payables.tool.js";
 import { GetVendorExpensesTool } from "./tools/get-vendor-expenses.tool.js";
 import { GetVendorBalanceTool } from "./tools/get-vendor-balance.tool.js";
 
-function registerAllTools(server: McpServer) {
+export function registerAllTools(server: McpServer) {
   // Customers
   RegisterTool(server, CreateCustomerTool);
   RegisterTool(server, GetCustomerTool);
@@ -416,71 +416,30 @@ async function startStdioTransport() {
 
 async function startHttpTransport() {
   const port = parseInt(process.env.PORT || "8000", 10);
+  const host = process.env.HOST || "127.0.0.1";
 
   const httpServer = http.createServer(async (req, res) => {
-    // Extract Bearer token from Authorization header
-    const authHeader = req.headers.authorization || "";
-    const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+    const url = new URL(req.url || "/", `http://${host}:${port}`);
 
-    // Run MCP handling inside AsyncLocalStorage context so tool handlers
-    // can access the per-request access token
-    authStorage.run({ accessToken: token }, async () => {
-      try {
-        const url = new URL(req.url || "/", `http://localhost:${port}`);
+    if (url.pathname === "/health") {
+      res.writeHead(200, { "Content-Type": "text/plain" });
+      res.end("ok");
+      return;
+    }
 
-        if (url.pathname === "/health") {
-          res.writeHead(200, { "Content-Type": "text/plain" });
-          res.end("ok");
-          return;
-        }
+    if (url.pathname !== "/mcp") {
+      res.writeHead(404);
+      res.end();
+      return;
+    }
 
-        if (url.pathname !== "/mcp") {
-          res.writeHead(404);
-          res.end();
-          return;
-        }
-
-        if (req.method === "POST") {
-          // Stateless mode: new server + transport per request
-          const transport = new StreamableHTTPServerTransport({
-            sessionIdGenerator: undefined,
-          });
-          const server = createMcpServer();
-          registerAllTools(server);
-          await server.connect(transport);
-
-          // Parse request body
-          const body = await new Promise<string>((resolve) => {
-            let data = "";
-            req.on("data", (chunk: Buffer) => { data += chunk.toString(); });
-            req.on("end", () => resolve(data));
-          });
-
-          await transport.handleRequest(req, res, JSON.parse(body));
-        } else if (req.method === "GET") {
-          // SSE not supported in stateless mode
-          res.writeHead(405, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ error: "SSE not supported in stateless mode" }));
-        } else if (req.method === "DELETE") {
-          // Session termination — no-op in stateless mode
-          res.writeHead(200);
-          res.end();
-        } else {
-          res.writeHead(405);
-          res.end();
-        }
-      } catch (error) {
-        console.error("Error handling MCP request:", error);
-        if (!res.headersSent) {
-          res.writeHead(500, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ error: "Internal server error" }));
-        }
-      }
-    });
+    await handleStreamableHttpRequest(req, res, registerAllTools);
   });
 
-  httpServer.listen(port, () => {
-    console.log(`QuickBooks MCP server listening on port ${port} (streamable-http)`);
+  httpServer.listen(port, host, () => {
+    console.log(
+      `QuickBooks MCP server listening on http://${host}:${port}/mcp (streamable-http)`,
+    );
   });
 }
 
@@ -494,7 +453,13 @@ const main = async () => {
   }
 };
 
-main().catch((error) => {
-  console.error("Error:", error);
-  process.exit(1);
-});
+const isMainModule = process.argv[1]
+  ? import.meta.url === pathToFileURL(process.argv[1]).href
+  : false;
+
+if (isMainModule) {
+  main().catch((error) => {
+    console.error("Error:", error);
+    process.exit(1);
+  });
+}
