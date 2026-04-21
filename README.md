@@ -91,6 +91,7 @@ This repo now supports two runtime modes:
 
 - `MCP_TRANSPORT=stdio` for local child-process MCP usage
 - `MCP_TRANSPORT=streamable-http` for HTTP deployments
+- `MCP_AUTH_MODE=connector` for Claude Team-style remote connector auth
 
 ### Local HTTP mode
 
@@ -106,22 +107,55 @@ The repo includes Vercel API functions and rewrites so deployed MCP clients can 
 - `https://your-project.vercel.app/mcp`
 - `https://your-project.vercel.app/health`
 
+In connector mode the deployment also exposes OAuth endpoints and MCP auth metadata:
+
+- `https://your-project.vercel.app/authorize`
+- `https://your-project.vercel.app/token`
+- `https://your-project.vercel.app/register`
+- `https://your-project.vercel.app/revoke`
+- `https://your-project.vercel.app/.well-known/oauth-authorization-server`
+- `https://your-project.vercel.app/.well-known/oauth-protected-resource/mcp`
+- `https://your-project.vercel.app/oauth/quickbooks/callback`
+
 Set these environment variables in Vercel:
 
 ```env
 MCP_TRANSPORT=streamable-http
+MCP_AUTH_MODE=connector
+MCP_PUBLIC_BASE_URL=https://your-project.vercel.app
+MCP_CONNECTOR_COOKIE_SECRET=replace_with_a_long_random_secret
+DATABASE_URL=postgresql://...
 QUICKBOOKS_CLIENT_ID=your_client_id
 QUICKBOOKS_CLIENT_SECRET=your_client_secret
-QUICKBOOKS_REFRESH_TOKEN=your_refresh_token
-QUICKBOOKS_REALM_ID=your_realm_id
 QUICKBOOKS_ENVIRONMENT=sandbox
 ```
 
+In connector mode, do **not** set `QUICKBOOKS_REFRESH_TOKEN` or `QUICKBOOKS_REALM_ID` for multi-tenant production traffic. Per-connector-installation QuickBooks refresh tokens are stored server-side in Supabase Vault, and connection metadata is stored in the private `mcp_private` schema.
+
+The connector principal is stabilized with an HTTP-only signed cookie created during the Claude OAuth flow. That principal is then bound to the stored QuickBooks connection and the connector-issued bearer tokens.
+
 The deployed HTTP path is stateless and POST-only. It returns JSON responses for MCP requests and does not expose a standalone GET/SSE stream.
 
-If a request includes `Authorization: Bearer <token>`, that access token is used for that request. If no bearer token is provided, the server falls back to the configured QuickBooks OAuth environment variables above.
+In connector mode, `/mcp` expects a valid MCP OAuth bearer token for this resource. The bearer token is **not** treated as a raw QuickBooks access token. The server verifies the Claude connector token, resolves the bound QuickBooks connection for that connector principal, and refreshes QuickBooks access server-side.
+
+Connector tokens must include:
+
+- `mcp` and `mcp:read` for read/search/get tools
+- `mcp:write` for create/update/delete tools
+
+Write tools are denied by default unless the connector token carries `mcp:write`.
 
 This deployment shape is intended for server-to-server MCP clients. It is not configured as a browser CORS endpoint.
+
+### Additional Supabase migration
+
+If you are enabling connector mode, apply both Supabase migrations in `supabase/migrations/`.
+
+The second migration adds:
+
+- connector-specific QuickBooks connection and audit tables
+- OAuth client, code, access-token, refresh-token, and pending-auth tables
+- the storage schema needed by the connector auth provider
 
 ### OAuth bootstrap note
 

@@ -8,6 +8,46 @@
     {
       "source": "/health",
       "destination": "/api/health"
+    },
+    {
+      "source": "/authorize",
+      "destination": "/api/authorize"
+    },
+    {
+      "source": "/token",
+      "destination": "/api/token"
+    },
+    {
+      "source": "/register",
+      "destination": "/api/register"
+    },
+    {
+      "source": "/revoke",
+      "destination": "/api/revoke"
+    },
+    {
+      "source": "/.well-known/oauth-authorization-server",
+      "destination": "/api/.well-known/oauth-authorization-server"
+    },
+    {
+      "source": "/.well-known/oauth-protected-resource/mcp",
+      "destination": "/api/.well-known/oauth-protected-resource/mcp"
+    },
+    {
+      "source": "/oauth/quickbooks/start",
+      "destination": "/api/oauth/quickbooks/start"
+    },
+    {
+      "source": "/oauth/quickbooks/callback",
+      "destination": "/api/oauth/quickbooks/callback"
+    },
+    {
+      "source": "/oauth/quickbooks/status",
+      "destination": "/api/oauth/quickbooks/status"
+    },
+    {
+      "source": "/oauth/quickbooks/disconnect",
+      "destination": "/api/oauth/quickbooks/disconnect"
     }
   ]
 }

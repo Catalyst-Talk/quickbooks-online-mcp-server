@@ -4,12 +4,12 @@ import { z } from "zod";
 
 export function RegisterTool<T extends z.ZodType<any, any>>(
   server: McpServer,
-  toolDefinition: ToolDefinition<T>
+  toolDefinition: ToolDefinition<T>,
 ) {
   server.tool(
     toolDefinition.name,
     toolDefinition.description,
     { params: toolDefinition.schema },
-    toolDefinition.handler
+    toolDefinition.handler,
   );
 }
