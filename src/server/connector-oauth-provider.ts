@@ -149,6 +149,20 @@ function queryToSearchParams(query: Request["query"]): URLSearchParams {
   return searchParams;
 }
 
+function getLoggableErrorDetails(error: unknown): Record<string, unknown> {
+  if (error instanceof Error) {
+    return {
+      errorName: error.name,
+      errorMessage: error.message,
+    };
+  }
+
+  return {
+    errorName: "UnknownError",
+    errorMessage: String(error),
+  };
+}
+
 class ConnectorOAuthClientsStore implements OAuthRegisteredClientsStore {
   async getClient(
     clientId: string,
@@ -259,11 +273,14 @@ export async function handleQuickBooksOAuthCallback(
   req: Request,
   res: Response,
 ): Promise<void> {
+  let callbackStage = "validate_callback_params";
   const state =
     typeof req.query.state === "string" ? req.query.state : undefined;
   const code = typeof req.query.code === "string" ? req.query.code : undefined;
   const realmId =
     typeof req.query.realmId === "string" ? req.query.realmId : undefined;
+  let connection: StoredQuickBooksConnection | null = null;
+  let connectionId: string | undefined;
 
   if (!state || !code || !realmId) {
     res
@@ -272,6 +289,7 @@ export async function handleQuickBooksOAuthCallback(
     return;
   }
 
+  callbackStage = "consume_pending_authorization";
   const pendingAuthorization =
     await connectorAuthStore.consumePendingAuthorization(state);
   if (!pendingAuthorization) {
@@ -281,15 +299,34 @@ export async function handleQuickBooksOAuthCallback(
     return;
   }
 
+  const principalId = pendingAuthorization.principalId;
+  const clientId = pendingAuthorization.clientId;
+  const requestedScope = pendingAuthorization.requestedScope || DEFAULT_MCP_SCOPE;
+
   const callbackUrl = new URL("/oauth/quickbooks/callback", getPublicBaseUrl());
   callbackUrl.search = queryToSearchParams(req.query).toString();
 
-  const tokenResponse = await exchangeQuickBooksCallback(
-    callbackUrl.toString(),
-    {
+  let tokenResponse;
+  try {
+    callbackStage = "exchange_quickbooks_callback";
+    tokenResponse = await exchangeQuickBooksCallback(callbackUrl.toString(), {
       redirectUri: getQuickBooksCallbackUrl(),
-    },
-  );
+    });
+  } catch (error) {
+    const failureStage = callbackStage;
+    console.error("QuickBooks callback failed", {
+      stage: failureStage,
+      principalId,
+      clientId,
+      realmId,
+      requestedScope,
+      connectionId,
+      environment: getQuickBooksEnvironment(),
+      ...getLoggableErrorDetails(error),
+    });
+
+    throw error;
+  }
 
   if (!tokenResponse.refresh_token || !tokenResponse.realmId) {
     res.status(502).json({
@@ -298,10 +335,9 @@ export async function handleQuickBooksOAuthCallback(
     return;
   }
 
-  const principalId = pendingAuthorization.principalId;
-  let connection: StoredQuickBooksConnection | null = null;
   let authorizationCode: string | null = null;
   try {
+    callbackStage = "store_quickbooks_connection";
     connection = await connectorAuthStore.storeQuickBooksConnection({
       principalId,
       realmId: tokenResponse.realmId,
@@ -309,17 +345,20 @@ export async function handleQuickBooksOAuthCallback(
       refreshToken: tokenResponse.refresh_token,
       scopes: [OAuthClient.scopes.Accounting as string],
     });
+    connectionId = connection.id;
 
+    callbackStage = "create_authorization_code";
     authorizationCode = await connectorAuthStore.createAuthorizationCode({
       clientId: pendingAuthorization.clientId,
       principalId,
       redirectUri: pendingAuthorization.redirectUri,
       codeChallenge: pendingAuthorization.codeChallenge,
-      scope: pendingAuthorization.requestedScope || DEFAULT_MCP_SCOPE,
+      scope: requestedScope,
       resource: pendingAuthorization.resource,
       quickbooksConnectionId: connection.id,
     });
 
+    callbackStage = "write_success_audit_event";
     await connectorAuthStore.writeAuditEvent({
       principalId,
       connectionId: connection.id,
@@ -330,24 +369,57 @@ export async function handleQuickBooksOAuthCallback(
       outcome: "success",
     });
   } catch (error) {
+    const failureStage = callbackStage;
+    console.error("QuickBooks callback failed", {
+      stage: failureStage,
+      principalId,
+      clientId,
+      realmId: connection?.realmId ?? realmId,
+      requestedScope,
+      connectionId,
+      environment: getQuickBooksEnvironment(),
+      ...getLoggableErrorDetails(error),
+    });
+
     if (connection) {
-      invalidateConnectorTokenCache(connection.id);
-      await connectorAuthStore.updateConnectionStatus({
-        connectionId: connection.id,
-        status: "disconnected",
-      });
-      await connectorAuthStore.revokeTokensForConnection(connection.id);
-      await connectorAuthStore.writeAuditEvent({
-        principalId,
-        connectionId: connection.id,
-        realmId: connection.realmId,
-        toolName: "oauth_callback",
-        actionType: "write",
-        decision: "allowed",
-        outcome: "failure",
-        errorCode: error instanceof Error ? error.message : "callback_failed",
-      });
+      try {
+        callbackStage = "cleanup_invalidate_connector_token_cache";
+        invalidateConnectorTokenCache(connection.id);
+        callbackStage = "cleanup_update_connection_status";
+        await connectorAuthStore.updateConnectionStatus({
+          connectionId: connection.id,
+          status: "disconnected",
+        });
+        callbackStage = "cleanup_revoke_tokens_for_connection";
+        await connectorAuthStore.revokeTokensForConnection(connection.id);
+        callbackStage = "cleanup_write_failure_audit_event";
+        await connectorAuthStore.writeAuditEvent({
+          principalId: principalId ?? "unknown-principal",
+          connectionId: connection.id,
+          realmId: connection.realmId,
+          toolName: "oauth_callback",
+          actionType: "write",
+          decision: "allowed",
+          outcome: "failure",
+          errorCode: error instanceof Error ? error.message : "callback_failed",
+          metadata: { failedStage: failureStage },
+        });
+      } catch (cleanupError) {
+        console.error("QuickBooks callback cleanup failed", {
+          stage: callbackStage,
+          failedStage: failureStage,
+          principalId,
+          clientId,
+          realmId: connection.realmId,
+          requestedScope,
+          connectionId: connection.id,
+          environment: getQuickBooksEnvironment(),
+          ...getLoggableErrorDetails(cleanupError),
+        });
+        throw cleanupError;
+      }
     }
+
     throw error;
   }
 
