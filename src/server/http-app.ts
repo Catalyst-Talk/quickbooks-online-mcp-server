@@ -56,6 +56,19 @@ function requireScope(scope: "mcp:read" | "mcp:write") {
 function createApp(): express.Express {
   const instance = express();
 
+  // Vercel terminates TLS and forwards client IPs through X-Forwarded-* headers.
+  // The MCP SDK auth router uses express-rate-limit internally, which expects
+  // Express proxy trust to be configured when those headers are present.
+  instance.set("trust proxy", 1);
+
+  // express-rate-limit warns on the RFC 7239 Forwarded header because Express
+  // does not parse it for req.ip. Vercel already provides X-Forwarded-For, which
+  // is sufficient once trust proxy is enabled, so strip the redundant header.
+  instance.use((req, _res, next) => {
+    delete req.headers.forwarded;
+    next();
+  });
+
   instance.get(["/health", "/api/health"], (_req, res) => {
     res.status(200).type("text/plain").send("ok");
   });
