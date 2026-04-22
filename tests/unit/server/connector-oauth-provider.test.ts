@@ -462,6 +462,58 @@ describe("ConnectorOAuthServerProvider", () => {
     expect(response.json).toHaveBeenCalledWith({
       error: "QuickBooks token response missing refresh token or realm ID",
     });
+    expect(writeAuditEventMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        principalId: "connector:test-principal",
+        connectionId: undefined,
+        realmId: "realm-123",
+        errorCode: "QuickBooks token response missing refresh token or realm ID",
+        metadata: expect.objectContaining({
+          failedStage: "validate_token_response",
+          clientId: "claude-client",
+          requestedScope: "mcp mcp:read",
+        }),
+      }),
+    );
+    expect(invalidateConnectorTokenCacheMock).not.toHaveBeenCalled();
+    expect(updateConnectionStatusMock).not.toHaveBeenCalled();
+    expect(revokeTokensForConnectionMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps the 502 response when token-response audit logging fails", async () => {
+    exchangeQuickBooksCallbackMock.mockResolvedValueOnce({});
+    writeAuditEventMock.mockRejectedValueOnce(new Error("audit insert failed"));
+    const response = createJsonResponse();
+
+    await handleQuickBooksOAuthCallback(
+      {
+        query: {
+          state: "quickbooks-state",
+          code: "quickbooks-code",
+          realmId: "realm-123",
+        },
+      } as any,
+      response,
+    );
+
+    expect(response.status).toHaveBeenCalledWith(502);
+    expect(response.json).toHaveBeenCalledWith({
+      error: "QuickBooks token response missing refresh token or realm ID",
+    });
+    expect(consoleErrorSpy).toHaveBeenCalledWith(
+      "QuickBooks callback audit logging failed",
+      expect.objectContaining({
+        stage: "write_failure_audit_event",
+        failedStage: "validate_token_response",
+        principalId: "connector:test-principal",
+        clientId: "claude-client",
+        realmId: "realm-123",
+        requestedScope: "mcp mcp:read",
+        connectionId: undefined,
+        errorName: "Error",
+        errorMessage: "audit insert failed",
+      }),
+    );
   });
 
   it("logs the callback stage when the QuickBooks token exchange fails", async () => {
@@ -494,6 +546,19 @@ describe("ConnectorOAuthServerProvider", () => {
         environment: "sandbox",
         errorName: "Error",
         errorMessage: "token exchange failed",
+      }),
+    );
+    expect(writeAuditEventMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        principalId: "connector:test-principal",
+        connectionId: undefined,
+        realmId: "realm-123",
+        errorCode: "token exchange failed",
+        metadata: expect.objectContaining({
+          failedStage: "exchange_quickbooks_callback",
+          clientId: "claude-client",
+          requestedScope: "mcp mcp:read",
+        }),
       }),
     );
   });
@@ -658,6 +723,19 @@ describe("ConnectorOAuthServerProvider", () => {
         errorMessage: "store failed",
       }),
     );
+    expect(writeAuditEventMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        principalId: "connector:test-principal",
+        connectionId: undefined,
+        realmId: "realm-123",
+        errorCode: "store failed",
+        metadata: expect.objectContaining({
+          failedStage: "store_quickbooks_connection",
+          clientId: "claude-client",
+          requestedScope: "mcp mcp:read",
+        }),
+      }),
+    );
   });
 
   it("cleans up and records the error message when authorization code creation throws an Error", async () => {
@@ -702,7 +780,9 @@ describe("ConnectorOAuthServerProvider", () => {
       expect.objectContaining({
         outcome: "failure",
         errorCode: "authorization code failed",
-        metadata: { failedStage: "create_authorization_code" },
+        metadata: expect.objectContaining({
+          failedStage: "create_authorization_code",
+        }),
       }),
     );
     expect(consoleErrorSpy).toHaveBeenCalledWith(
@@ -752,7 +832,9 @@ describe("ConnectorOAuthServerProvider", () => {
       expect.objectContaining({
         outcome: "failure",
         errorCode: "callback_failed",
-        metadata: { failedStage: "create_authorization_code" },
+        metadata: expect.objectContaining({
+          failedStage: "create_authorization_code",
+        }),
       }),
     );
     expect(consoleErrorSpy).toHaveBeenCalledWith(
@@ -845,7 +927,9 @@ describe("ConnectorOAuthServerProvider", () => {
     );
     expect(writeAuditEventMock).toHaveBeenLastCalledWith(
       expect.objectContaining({
-        metadata: { failedStage: "write_success_audit_event" },
+        metadata: expect.objectContaining({
+          failedStage: "write_success_audit_event",
+        }),
       }),
     );
     expect(consoleErrorSpy).toHaveBeenCalledWith(
@@ -886,7 +970,69 @@ describe("ConnectorOAuthServerProvider", () => {
     expect(writeAuditEventMock).toHaveBeenLastCalledWith(
       expect.objectContaining({
         principalId: "unknown-principal",
-        metadata: { failedStage: "create_authorization_code" },
+        metadata: expect.objectContaining({
+          failedStage: "create_authorization_code",
+        }),
+      }),
+    );
+  });
+
+  it("keeps the original exchange error when pre-connection audit logging fails", async () => {
+    exchangeQuickBooksCallbackMock.mockRejectedValueOnce(
+      new Error("token exchange failed"),
+    );
+    writeAuditEventMock.mockRejectedValueOnce(new Error("audit insert failed"));
+
+    await expect(
+      handleQuickBooksOAuthCallback(
+        {
+          query: {
+            state: "quickbooks-state",
+            code: "quickbooks-code",
+            realmId: "realm-123",
+          },
+        } as any,
+        createJsonResponse(),
+      ),
+    ).rejects.toThrow("token exchange failed");
+
+    expect(consoleErrorSpy).toHaveBeenNthCalledWith(
+      2,
+      "QuickBooks callback audit logging failed",
+      expect.objectContaining({
+        stage: "write_failure_audit_event",
+        failedStage: "exchange_quickbooks_callback",
+        errorName: "Error",
+        errorMessage: "audit insert failed",
+      }),
+    );
+  });
+
+  it("keeps the original store failure when pre-connection audit logging fails", async () => {
+    storeQuickBooksConnectionMock.mockRejectedValueOnce(new Error("store failed"));
+    writeAuditEventMock.mockRejectedValueOnce(new Error("audit insert failed"));
+
+    await expect(
+      handleQuickBooksOAuthCallback(
+        {
+          query: {
+            state: "quickbooks-state",
+            code: "quickbooks-code",
+            realmId: "realm-123",
+          },
+        } as any,
+        createJsonResponse(),
+      ),
+    ).rejects.toThrow("store failed");
+
+    expect(consoleErrorSpy).toHaveBeenNthCalledWith(
+      2,
+      "QuickBooks callback audit logging failed",
+      expect.objectContaining({
+        stage: "write_failure_audit_event",
+        failedStage: "store_quickbooks_connection",
+        errorName: "Error",
+        errorMessage: "audit insert failed",
       }),
     );
   });

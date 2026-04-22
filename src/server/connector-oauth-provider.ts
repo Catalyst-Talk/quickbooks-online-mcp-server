@@ -163,6 +163,33 @@ function getLoggableErrorDetails(error: unknown): Record<string, unknown> {
   };
 }
 
+async function writeQuickBooksCallbackFailureAudit(input: {
+  principalId: string;
+  realmId?: string;
+  connectionId?: string;
+  error: unknown;
+  failedStage: string;
+  clientId: string;
+  requestedScope: string;
+}): Promise<void> {
+  await connectorAuthStore.writeAuditEvent({
+    principalId: input.principalId,
+    connectionId: input.connectionId,
+    realmId: input.realmId,
+    toolName: "oauth_callback",
+    actionType: "write",
+    decision: "allowed",
+    outcome: "failure",
+    errorCode:
+      input.error instanceof Error ? input.error.message : "callback_failed",
+    metadata: {
+      failedStage: input.failedStage,
+      clientId: input.clientId,
+      requestedScope: input.requestedScope,
+    },
+  });
+}
+
 class ConnectorOAuthClientsStore implements OAuthRegisteredClientsStore {
   async getClient(
     clientId: string,
@@ -325,10 +352,60 @@ export async function handleQuickBooksOAuthCallback(
       ...getLoggableErrorDetails(error),
     });
 
+    try {
+      callbackStage = "write_failure_audit_event";
+      await writeQuickBooksCallbackFailureAudit({
+        principalId,
+        realmId,
+        error,
+        failedStage: failureStage,
+        clientId,
+        requestedScope,
+      });
+    } catch (auditError) {
+      console.error("QuickBooks callback audit logging failed", {
+        stage: callbackStage,
+        failedStage: failureStage,
+        principalId,
+        clientId,
+        realmId,
+        requestedScope,
+        connectionId,
+        environment: getQuickBooksEnvironment(),
+        ...getLoggableErrorDetails(auditError),
+      });
+    }
+
     throw error;
   }
 
   if (!tokenResponse.refresh_token || !tokenResponse.realmId) {
+    try {
+      callbackStage = "validate_token_response";
+      await writeQuickBooksCallbackFailureAudit({
+        principalId,
+        realmId,
+        error: new Error(
+          "QuickBooks token response missing refresh token or realm ID",
+        ),
+        failedStage: callbackStage,
+        clientId,
+        requestedScope,
+      });
+    } catch (auditError) {
+      console.error("QuickBooks callback audit logging failed", {
+        stage: "write_failure_audit_event",
+        failedStage: "validate_token_response",
+        principalId,
+        clientId,
+        realmId,
+        requestedScope,
+        connectionId,
+        environment: getQuickBooksEnvironment(),
+        ...getLoggableErrorDetails(auditError),
+      });
+    }
+
     res.status(502).json({
       error: "QuickBooks token response missing refresh token or realm ID",
     });
@@ -393,16 +470,14 @@ export async function handleQuickBooksOAuthCallback(
         callbackStage = "cleanup_revoke_tokens_for_connection";
         await connectorAuthStore.revokeTokensForConnection(connection.id);
         callbackStage = "cleanup_write_failure_audit_event";
-        await connectorAuthStore.writeAuditEvent({
+        await writeQuickBooksCallbackFailureAudit({
           principalId: principalId ?? "unknown-principal",
           connectionId: connection.id,
           realmId: connection.realmId,
-          toolName: "oauth_callback",
-          actionType: "write",
-          decision: "allowed",
-          outcome: "failure",
-          errorCode: error instanceof Error ? error.message : "callback_failed",
-          metadata: { failedStage: failureStage },
+          error,
+          failedStage: failureStage,
+          clientId,
+          requestedScope,
         });
       } catch (cleanupError) {
         console.error("QuickBooks callback cleanup failed", {
@@ -417,6 +492,30 @@ export async function handleQuickBooksOAuthCallback(
           ...getLoggableErrorDetails(cleanupError),
         });
         throw cleanupError;
+      }
+    } else {
+      try {
+        callbackStage = "write_failure_audit_event";
+        await writeQuickBooksCallbackFailureAudit({
+          principalId,
+          realmId,
+          error,
+          failedStage: failureStage,
+          clientId,
+          requestedScope,
+        });
+      } catch (auditError) {
+        console.error("QuickBooks callback audit logging failed", {
+          stage: callbackStage,
+          failedStage: failureStage,
+          principalId,
+          clientId,
+          realmId,
+          requestedScope,
+          connectionId,
+          environment: getQuickBooksEnvironment(),
+          ...getLoggableErrorDetails(auditError),
+        });
       }
     }
 
