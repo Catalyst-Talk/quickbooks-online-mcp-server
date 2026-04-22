@@ -32,8 +32,32 @@ export async function queryRows<T extends QueryResultRow>(
   text: string,
   values: unknown[] = [],
 ): Promise<T[]> {
-  const result = await getPostgresPool().query<T>(text, values);
-  return result.rows;
+  try {
+    const result = await getPostgresPool().query<T>(text, values);
+    return result.rows;
+  } catch (error) {
+    const err = error as {
+      message?: string;
+      code?: string;
+      detail?: string;
+      hint?: string;
+      schema?: string;
+      table?: string;
+      constraint?: string;
+    };
+    console.error("[postgres] query failed", {
+      message: err?.message,
+      code: err?.code,
+      detail: err?.detail,
+      hint: err?.hint,
+      schema: err?.schema,
+      table: err?.table,
+      constraint: err?.constraint,
+      sql: text.replace(/\s+/g, " ").trim().slice(0, 240),
+      valueCount: values.length,
+    });
+    throw error;
+  }
 }
 
 export async function queryOne<T extends QueryResultRow>(
@@ -47,7 +71,17 @@ export async function queryOne<T extends QueryResultRow>(
 export async function withPgClient<T>(
   fn: (client: PoolClient) => Promise<T>,
 ): Promise<T> {
-  const client = await getPostgresPool().connect();
+  let client: PoolClient;
+  try {
+    client = await getPostgresPool().connect();
+  } catch (error) {
+    const err = error as { message?: string; code?: string };
+    console.error("[postgres] failed to acquire client", {
+      message: err?.message,
+      code: err?.code,
+    });
+    throw error;
+  }
   try {
     return await fn(client);
   } finally {
@@ -66,6 +100,11 @@ export async function withPgTransaction<T>(
       return result;
     } catch (error) {
       await client.query("rollback");
+      const err = error as { message?: string; code?: string };
+      console.error("[postgres] transaction rolled back", {
+        message: err?.message,
+        code: err?.code,
+      });
       throw error;
     }
   });

@@ -212,47 +212,64 @@ export class ConnectorAuthStore {
       client_id_issued_at: number;
     },
   ): Promise<OAuthClientInformationFull> {
-    const row = await queryOne<OAuthClientRow>(
-      `
-        insert into mcp_private.connector_oauth_clients (
-          client_id,
-          client_secret,
-          redirect_uris,
-          token_endpoint_auth_method,
-          grant_types,
-          response_types,
-          client_name,
-          scope,
-          client_id_issued_at,
-          client_secret_expires_at
-        ) values ($1, $2, $3::jsonb, $4, $5::jsonb, $6::jsonb, $7, $8, $9, $10)
-        returning
-          client_id,
-          client_secret,
-          redirect_uris,
-          token_endpoint_auth_method,
-          grant_types,
-          response_types,
-          client_name,
-          scope,
-          client_id_issued_at,
-          client_secret_expires_at
-      `,
-      [
-        client.client_id,
-        client.client_secret ?? null,
-        JSON.stringify(client.redirect_uris),
-        client.token_endpoint_auth_method ?? "none",
-        JSON.stringify(
-          client.grant_types ?? ["authorization_code", "refresh_token"],
-        ),
-        JSON.stringify(client.response_types ?? ["code"]),
-        client.client_name ?? null,
-        client.scope ?? null,
-        client.client_id_issued_at,
-        client.client_secret_expires_at ?? null,
-      ],
-    );
+    let row: OAuthClientRow | null;
+    try {
+      row = await queryOne<OAuthClientRow>(
+        `
+          insert into mcp_private.connector_oauth_clients (
+            client_id,
+            client_secret,
+            redirect_uris,
+            token_endpoint_auth_method,
+            grant_types,
+            response_types,
+            client_name,
+            scope,
+            client_id_issued_at,
+            client_secret_expires_at
+          ) values ($1, $2, $3::jsonb, $4, $5::jsonb, $6::jsonb, $7, $8, $9, $10)
+          returning
+            client_id,
+            client_secret,
+            redirect_uris,
+            token_endpoint_auth_method,
+            grant_types,
+            response_types,
+            client_name,
+            scope,
+            client_id_issued_at,
+            client_secret_expires_at
+        `,
+        [
+          client.client_id,
+          client.client_secret ?? null,
+          JSON.stringify(client.redirect_uris),
+          client.token_endpoint_auth_method ?? "none",
+          JSON.stringify(
+            client.grant_types ?? ["authorization_code", "refresh_token"],
+          ),
+          JSON.stringify(client.response_types ?? ["code"]),
+          client.client_name ?? null,
+          client.scope ?? null,
+          client.client_id_issued_at,
+          client.client_secret_expires_at ?? null,
+        ],
+      );
+    } catch (error) {
+      console.error("[connector-auth] failed to register oauth client", {
+        clientId: client.client_id,
+        clientName: client.client_name,
+        redirectUris: client.redirect_uris,
+        tokenEndpointAuthMethod: client.token_endpoint_auth_method ?? "none",
+        grantTypes: client.grant_types ?? [
+          "authorization_code",
+          "refresh_token",
+        ],
+        responseTypes: client.response_types ?? ["code"],
+        scope: client.scope ?? null,
+      });
+      throw error;
+    }
 
     if (!row) {
       throw new Error("Failed to store OAuth client registration");
