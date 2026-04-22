@@ -25,6 +25,20 @@ import {
 } from "../storage/connector-auth-store.js";
 
 const DEFAULT_MCP_SCOPE = "mcp mcp:read";
+const REQUIRED_CONNECTOR_SCOPES = ["mcp", "mcp:read"] as const;
+
+function getEffectiveRequestedScope(scopes?: string[]): string {
+  if (!scopes?.length) {
+    return DEFAULT_MCP_SCOPE;
+  }
+
+  return Array.from(
+    new Set([
+      ...REQUIRED_CONNECTOR_SCOPES,
+      ...scopes.map((scope) => scope.trim()).filter(Boolean),
+    ]),
+  ).join(" ");
+}
 
 function getPublicBaseUrl(): URL {
   const baseUrl = process.env.MCP_PUBLIC_BASE_URL;
@@ -178,7 +192,7 @@ export class ConnectorOAuthServerProvider implements OAuthServerProvider {
       redirectUri: params.redirectUri,
       claudeState: params.state,
       codeChallenge: params.codeChallenge,
-      requestedScope: params.scopes?.join(" ") || DEFAULT_MCP_SCOPE,
+      requestedScope: getEffectiveRequestedScope(params.scopes),
       resource: params.resource?.href,
     });
 
