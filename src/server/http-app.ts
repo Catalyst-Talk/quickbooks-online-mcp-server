@@ -1,6 +1,7 @@
 import type { Request, Response, NextFunction } from "express";
 import express from "express";
 import {
+  createOAuthMetadata,
   getOAuthProtectedResourceMetadataUrl,
   mcpAuthRouter,
 } from "@modelcontextprotocol/sdk/server/auth/router.js";
@@ -85,8 +86,20 @@ function createApp(): express.Express {
       resourceName: "QuickBooks Online MCP Server",
       scopesSupported: ["mcp", "mcp:read", "mcp:write"],
     });
+    const oauthMetadata = createOAuthMetadata({
+      provider,
+      issuerUrl: publicBaseUrl,
+      baseUrl: publicBaseUrl,
+      scopesSupported: ["mcp", "mcp:read", "mcp:write"],
+    });
     const resourceMetadataUrl =
       getOAuthProtectedResourceMetadataUrl(resourceServerUrl);
+    const protectedResourceMetadata = {
+      resource: resourceServerUrl.href,
+      authorization_servers: [oauthMetadata.issuer],
+      scopes_supported: ["mcp", "mcp:read", "mcp:write"],
+      resource_name: "QuickBooks Online MCP Server",
+    };
     const bearerAuth = requireBearerAuth({
       verifier: provider,
       requiredScopes: ["mcp"],
@@ -95,6 +108,25 @@ function createApp(): express.Express {
 
     instance.use(authRouter);
     instance.use("/api", authRouter);
+
+    instance.get(
+      [
+        "/api/oauth-authorization-server",
+        "/.well-known/oauth-authorization-server",
+      ],
+      (_req, res) => {
+        res.status(200).json(oauthMetadata);
+      },
+    );
+    instance.get(
+      [
+        "/api/oauth-protected-resource/mcp",
+        "/.well-known/oauth-protected-resource/mcp",
+      ],
+      (_req, res) => {
+        res.status(200).json(protectedResourceMetadata);
+      },
+    );
 
     instance.get(
       ["/oauth/quickbooks/start", "/api/oauth/quickbooks/start"],
