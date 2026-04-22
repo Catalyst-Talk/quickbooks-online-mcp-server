@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import { beforeEach, describe, expect, it, jest } from "@jest/globals";
+import { afterEach, beforeEach, describe, expect, it, jest } from "@jest/globals";
 
 const buildQuickBooksAuthorizationUrlMock = jest.fn<
   (_input: { state: string; redirectUri?: string }) => string
@@ -123,9 +123,12 @@ function createSignedCookie(principalId: string, secret: string) {
   return `=ignored; mcp_connector_principal=${encodeURIComponent(`${principalId}.${signature}`)}`;
 }
 
+let consoleErrorSpy: jest.SpiedFunction<typeof console.error>;
+
 describe("ConnectorOAuthServerProvider", () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    consoleErrorSpy = jest.spyOn(console, "error").mockImplementation(() => {});
 
     process.env.MCP_PUBLIC_BASE_URL = "https://quickbooks.example.com";
     process.env.MCP_CONNECTOR_COOKIE_SECRET = "test-cookie-secret";
@@ -176,6 +179,10 @@ describe("ConnectorOAuthServerProvider", () => {
       refresh_token: "quickbooks-refresh-token",
       realmId: "realm-123",
     });
+  });
+
+  afterEach(() => {
+    consoleErrorSpy.mockRestore();
   });
 
   it("proxies OAuth client registration store methods", async () => {
@@ -457,6 +464,40 @@ describe("ConnectorOAuthServerProvider", () => {
     });
   });
 
+  it("logs the callback stage when the QuickBooks token exchange fails", async () => {
+    exchangeQuickBooksCallbackMock.mockRejectedValueOnce(
+      new Error("token exchange failed"),
+    );
+
+    await expect(
+      handleQuickBooksOAuthCallback(
+        {
+          query: {
+            state: "quickbooks-state",
+            code: "quickbooks-code",
+            realmId: "realm-123",
+          },
+        } as any,
+        createJsonResponse(),
+      ),
+    ).rejects.toThrow("token exchange failed");
+
+    expect(consoleErrorSpy).toHaveBeenCalledWith(
+      "QuickBooks callback failed",
+      expect.objectContaining({
+        stage: "exchange_quickbooks_callback",
+        principalId: "connector:test-principal",
+        clientId: "claude-client",
+        realmId: "realm-123",
+        requestedScope: "mcp mcp:read",
+        connectionId: undefined,
+        environment: "sandbox",
+        errorName: "Error",
+        errorMessage: "token exchange failed",
+      }),
+    );
+  });
+
   it("redirects back to Claude after a successful QuickBooks callback", async () => {
     process.env.QUICKBOOKS_ENVIRONMENT = "production";
     const response = createJsonResponse();
@@ -604,9 +645,32 @@ describe("ConnectorOAuthServerProvider", () => {
 
     expect(invalidateConnectorTokenCacheMock).not.toHaveBeenCalled();
     expect(connectorAuthStoreMock.updateConnectionStatus).not.toHaveBeenCalled();
+    expect(consoleErrorSpy).toHaveBeenCalledWith(
+      "QuickBooks callback failed",
+      expect.objectContaining({
+        stage: "store_quickbooks_connection",
+        principalId: "connector:test-principal",
+        clientId: "claude-client",
+        realmId: "realm-123",
+        requestedScope: "mcp mcp:read",
+        connectionId: undefined,
+        errorName: "Error",
+        errorMessage: "store failed",
+      }),
+    );
   });
 
   it("cleans up and records the error message when authorization code creation throws an Error", async () => {
+    storeQuickBooksConnectionMock.mockResolvedValueOnce({
+      id: "connection-123",
+      principalId: "connector:test-principal",
+      realmId: "stored-realm-123",
+      environment: "sandbox",
+      refreshTokenSecretId: "secret-123",
+      scopes: ["com.intuit.quickbooks.accounting"],
+      status: "active",
+      companyName: "Acme Corp",
+    });
     connectorAuthStoreMock.createAuthorizationCode.mockRejectedValueOnce(
       new Error("authorization code failed"),
     );
@@ -638,11 +702,35 @@ describe("ConnectorOAuthServerProvider", () => {
       expect.objectContaining({
         outcome: "failure",
         errorCode: "authorization code failed",
+        metadata: { failedStage: "create_authorization_code" },
+      }),
+    );
+    expect(consoleErrorSpy).toHaveBeenCalledWith(
+      "QuickBooks callback failed",
+      expect.objectContaining({
+        stage: "create_authorization_code",
+        principalId: "connector:test-principal",
+        clientId: "claude-client",
+        realmId: "stored-realm-123",
+        requestedScope: "mcp mcp:read",
+        connectionId: "connection-123",
+        errorName: "Error",
+        errorMessage: "authorization code failed",
       }),
     );
   });
 
   it("falls back to callback_failed when authorization code creation throws a non-Error", async () => {
+    storeQuickBooksConnectionMock.mockResolvedValueOnce({
+      id: "connection-123",
+      principalId: "connector:test-principal",
+      realmId: "stored-realm-123",
+      environment: "sandbox",
+      refreshTokenSecretId: "secret-123",
+      scopes: ["com.intuit.quickbooks.accounting"],
+      status: "active",
+      companyName: "Acme Corp",
+    });
     connectorAuthStoreMock.createAuthorizationCode.mockRejectedValueOnce(
       "authorization code failed",
     );
@@ -664,6 +752,141 @@ describe("ConnectorOAuthServerProvider", () => {
       expect.objectContaining({
         outcome: "failure",
         errorCode: "callback_failed",
+        metadata: { failedStage: "create_authorization_code" },
+      }),
+    );
+    expect(consoleErrorSpy).toHaveBeenCalledWith(
+      "QuickBooks callback failed",
+      expect.objectContaining({
+        stage: "create_authorization_code",
+        principalId: "connector:test-principal",
+        clientId: "claude-client",
+        realmId: "stored-realm-123",
+        requestedScope: "mcp mcp:read",
+        connectionId: "connection-123",
+        errorName: "UnknownError",
+        errorMessage: "authorization code failed",
+      }),
+    );
+  });
+
+  it("logs cleanup stage failures after a partial callback success", async () => {
+    storeQuickBooksConnectionMock.mockResolvedValueOnce({
+      id: "connection-123",
+      principalId: "connector:test-principal",
+      realmId: "stored-realm-123",
+      environment: "sandbox",
+      refreshTokenSecretId: "secret-123",
+      scopes: ["com.intuit.quickbooks.accounting"],
+      status: "active",
+      companyName: "Acme Corp",
+    });
+    createAuthorizationCodeMock.mockRejectedValueOnce(
+      new Error("authorization code failed"),
+    );
+    updateConnectionStatusMock.mockRejectedValueOnce(new Error("cleanup failed"));
+
+    await expect(
+      handleQuickBooksOAuthCallback(
+        {
+          query: {
+            state: "quickbooks-state",
+            code: "quickbooks-code",
+            realmId: "realm-123",
+          },
+        } as any,
+        createJsonResponse(),
+      ),
+    ).rejects.toThrow("cleanup failed");
+
+    expect(consoleErrorSpy).toHaveBeenNthCalledWith(
+      1,
+      "QuickBooks callback failed",
+      expect.objectContaining({
+        stage: "create_authorization_code",
+        connectionId: "connection-123",
+        errorMessage: "authorization code failed",
+      }),
+    );
+    expect(consoleErrorSpy).toHaveBeenNthCalledWith(
+      2,
+      "QuickBooks callback cleanup failed",
+      expect.objectContaining({
+        stage: "cleanup_update_connection_status",
+        failedStage: "create_authorization_code",
+        connectionId: "connection-123",
+        realmId: "stored-realm-123",
+        errorName: "Error",
+        errorMessage: "cleanup failed",
+      }),
+    );
+  });
+
+  it("logs the success audit stage and still cleans up when success audit writing fails", async () => {
+    writeAuditEventMock
+      .mockRejectedValueOnce(new Error("success audit failed"))
+      .mockResolvedValueOnce(undefined);
+
+    await expect(
+      handleQuickBooksOAuthCallback(
+        {
+          query: {
+            state: "quickbooks-state",
+            code: "quickbooks-code",
+            realmId: "realm-123",
+          },
+        } as any,
+        createJsonResponse(),
+      ),
+    ).rejects.toThrow("success audit failed");
+
+    expect(invalidateConnectorTokenCacheMock).toHaveBeenCalledWith(
+      "connection-123",
+    );
+    expect(writeAuditEventMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        metadata: { failedStage: "write_success_audit_event" },
+      }),
+    );
+    expect(consoleErrorSpy).toHaveBeenCalledWith(
+      "QuickBooks callback failed",
+      expect.objectContaining({
+        stage: "write_success_audit_event",
+        realmId: "realm-123",
+        connectionId: "connection-123",
+        errorMessage: "success audit failed",
+      }),
+    );
+  });
+
+  it("uses the unknown-principal fallback when cleanup audit logging runs without a principal", async () => {
+    consumePendingAuthorizationMock.mockResolvedValueOnce({
+      clientId: "claude-client",
+      redirectUri: "https://claude.example.com/oauth/callback",
+      codeChallenge: "pkce-challenge",
+      requestedScope: "mcp mcp:read",
+    });
+    createAuthorizationCodeMock.mockRejectedValueOnce(
+      new Error("authorization code failed"),
+    );
+
+    await expect(
+      handleQuickBooksOAuthCallback(
+        {
+          query: {
+            state: "quickbooks-state",
+            code: "quickbooks-code",
+            realmId: "realm-123",
+          },
+        } as any,
+        createJsonResponse(),
+      ),
+    ).rejects.toThrow("authorization code failed");
+
+    expect(writeAuditEventMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        principalId: "unknown-principal",
+        metadata: { failedStage: "create_authorization_code" },
       }),
     );
   });
