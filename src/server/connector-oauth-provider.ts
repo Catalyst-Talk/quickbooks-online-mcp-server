@@ -18,6 +18,11 @@ import {
   invalidateConnectorTokenCache,
 } from "../clients/quickbooks-client.js";
 import {
+  getQuickBooksConnectionMode,
+  getQuickBooksConnectionOwnerPrincipalId,
+  isSharedQuickBooksConnectionMode,
+} from "../clients/quickbooks-connection-mode.js";
+import {
   connectorAuthStore,
   createPrincipalId,
   MultipleActiveQuickBooksConnectionsError,
@@ -128,6 +133,38 @@ function getPrincipalIdFromRequest(req: Request): string {
   return principalId;
 }
 
+function getConnectionAuditMetadata(
+  principalId: string,
+  connection: StoredQuickBooksConnection,
+): Record<string, unknown> | undefined {
+  const connectionMode = getQuickBooksConnectionMode();
+  if (
+    connectionMode === "per-principal" &&
+    connection.principalId === principalId
+  ) {
+    return undefined;
+  }
+
+  return {
+    connectionMode,
+    connectionOwnerPrincipalId: connection.principalId,
+  };
+}
+
+function getClientRedirectUrl(input: {
+  redirectUri: string;
+  authorizationCode: string;
+  state?: string;
+}): string {
+  const redirectUrl = new URL(input.redirectUri);
+  redirectUrl.searchParams.set("code", input.authorizationCode);
+  if (input.state) {
+    redirectUrl.searchParams.set("state", input.state);
+  }
+
+  return redirectUrl.toString();
+}
+
 function queryToSearchParams(query: Request["query"]): URLSearchParams {
   const searchParams = new URLSearchParams();
 
@@ -227,13 +264,58 @@ export class ConnectorOAuthServerProvider implements OAuthServerProvider {
       throw new Error("Authorize flow is missing the originating request");
     }
 
+    const principalId = getOrCreateConnectorPrincipalId(req, res);
+    const requestedScope = getEffectiveRequestedScope(params.scopes);
+
+    if (isSharedQuickBooksConnectionMode()) {
+      const sharedConnection =
+        await connectorAuthStore.getActiveQuickBooksConnection(
+          getQuickBooksConnectionOwnerPrincipalId(principalId),
+        );
+
+      if (sharedConnection) {
+        const authorizationCode = await connectorAuthStore.createAuthorizationCode(
+          {
+            clientId: client.client_id,
+            principalId,
+            redirectUri: params.redirectUri,
+            codeChallenge: params.codeChallenge,
+            scope: requestedScope,
+            resource: params.resource?.href,
+            quickbooksConnectionId: sharedConnection.id,
+          },
+        );
+
+        await connectorAuthStore.writeAuditEvent({
+          principalId,
+          connectionId: sharedConnection.id,
+          realmId: sharedConnection.realmId,
+          toolName: "oauth_authorize",
+          actionType: "read",
+          decision: "allowed",
+          outcome: "success",
+          metadata: getConnectionAuditMetadata(principalId, sharedConnection),
+        });
+
+        res.redirect(
+          302,
+          getClientRedirectUrl({
+            redirectUri: params.redirectUri,
+            authorizationCode,
+            state: params.state,
+          }),
+        );
+        return;
+      }
+    }
+
     const intuitState = await connectorAuthStore.createPendingAuthorization({
-      principalId: getOrCreateConnectorPrincipalId(req, res),
+      principalId,
       clientId: client.client_id,
       redirectUri: params.redirectUri,
       claudeState: params.state,
       codeChallenge: params.codeChallenge,
-      requestedScope: getEffectiveRequestedScope(params.scopes),
+      requestedScope,
       resource: params.resource?.href,
     });
 
@@ -415,8 +497,10 @@ export async function handleQuickBooksOAuthCallback(
   let authorizationCode: string | null = null;
   try {
     callbackStage = "store_quickbooks_connection";
+    const connectionOwnerPrincipalId =
+      getQuickBooksConnectionOwnerPrincipalId(principalId);
     connection = await connectorAuthStore.storeQuickBooksConnection({
-      principalId,
+      principalId: connectionOwnerPrincipalId,
       realmId: tokenResponse.realmId,
       environment: getQuickBooksEnvironment(),
       refreshToken: tokenResponse.refresh_token,
@@ -444,6 +528,7 @@ export async function handleQuickBooksOAuthCallback(
       actionType: "write",
       decision: "allowed",
       outcome: "success",
+      metadata: getConnectionAuditMetadata(principalId, connection),
     });
   } catch (error) {
     const failureStage = callbackStage;
@@ -529,15 +614,16 @@ export async function handleQuickBooksOAuthCallback(
     return;
   }
 
-  const redirectUrl = new URL(pendingAuthorization.redirectUri);
-  redirectUrl.searchParams.set("code", authorizationCode);
-  if (pendingAuthorization.claudeState) {
-    redirectUrl.searchParams.set("state", pendingAuthorization.claudeState);
-  }
-
   res.setHeader("Set-Cookie", serializePrincipalCookie(principalId));
 
-  res.redirect(302, redirectUrl.toString());
+  res.redirect(
+    302,
+    getClientRedirectUrl({
+      redirectUri: pendingAuthorization.redirectUri,
+      authorizationCode,
+      state: pendingAuthorization.claudeState,
+    }),
+  );
 }
 
 export async function handleQuickBooksStatus(
@@ -547,8 +633,9 @@ export async function handleQuickBooksStatus(
   const principalId = getPrincipalIdFromRequest(req);
   let connection: StoredQuickBooksConnection | null;
   try {
-    connection =
-      await connectorAuthStore.getActiveQuickBooksConnection(principalId);
+    connection = await connectorAuthStore.getActiveQuickBooksConnection(
+      getQuickBooksConnectionOwnerPrincipalId(principalId),
+    );
   } catch (error) {
     if (error instanceof MultipleActiveQuickBooksConnectionsError) {
       res.status(409).json({ error: error.message });
@@ -577,10 +664,20 @@ export async function handleQuickBooksDisconnect(
   res: Response,
 ): Promise<void> {
   const principalId = getPrincipalIdFromRequest(req);
+
+  if (isSharedQuickBooksConnectionMode()) {
+    res.status(403).json({
+      error:
+        "Shared QuickBooks connections must be disconnected by a server operator",
+    });
+    return;
+  }
+
   let connection: StoredQuickBooksConnection | null;
   try {
-    connection =
-      await connectorAuthStore.getActiveQuickBooksConnection(principalId);
+    connection = await connectorAuthStore.getActiveQuickBooksConnection(
+      getQuickBooksConnectionOwnerPrincipalId(principalId),
+    );
   } catch (error) {
     if (error instanceof MultipleActiveQuickBooksConnectionsError) {
       res.status(409).json({ error: error.message });

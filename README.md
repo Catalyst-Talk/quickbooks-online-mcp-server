@@ -134,6 +134,17 @@ In connector mode, do **not** set `QUICKBOOKS_REFRESH_TOKEN` or `QUICKBOOKS_REAL
 
 The connector principal is stabilized with an HTTP-only signed cookie created during the Claude OAuth flow. That principal is then bound to the stored QuickBooks connection and the connector-issued bearer tokens.
 
+For a shared company install where one QuickBooks admin connects the company and other organization users use that same connection through MCP auth, add:
+
+```env
+MCP_QUICKBOOKS_CONNECTION_MODE=shared
+MCP_QUICKBOOKS_SHARED_CONNECTION_ORG_ID=your_org_or_workspace_id
+```
+
+In shared mode, the first successful QuickBooks admin OAuth callback stores the company connection under a shared connector owner scoped by `MCP_QUICKBOOKS_SHARED_CONNECTION_ORG_ID`. Later connector users skip the Intuit OAuth install step and receive MCP tokens bound to the existing company connection. Their tool calls are still audited with their own connector principal. To choose the full shared owner key yourself, set `MCP_QUICKBOOKS_SHARED_CONNECTION_PRINCIPAL_ID`; otherwise the server uses `connector:shared-quickbooks-installation:<org-id>`.
+
+Shared mode is intended for one organization or workspace per shared owner key. This repo does not infer a Claude organization ID from connector requests, so deployments serving multiple organizations must set distinct shared owner keys per organization before routing requests to this server. Shared QuickBooks connections cannot be disconnected through the connector API; disconnect or replacement should be handled by a server operator so one write-capable user cannot sever the company-wide connection for everyone.
+
 The deployed HTTP path is stateless and POST-only. It returns JSON responses for MCP requests and does not expose a standalone GET/SSE stream.
 
 In connector mode, `/mcp` expects a valid MCP OAuth bearer token for this resource. The bearer token is **not** treated as a raw QuickBooks access token. The server verifies the Claude connector token, resolves the bound QuickBooks connection for that connector principal, and refreshes QuickBooks access server-side.
@@ -464,7 +475,13 @@ npm run build
 npm test
 ```
 
-The test suite includes **335 tests** with **100% code coverage** across all metrics (statements, branches, functions, lines).
+Run coverage explicitly with:
+
+```bash
+npm run test:coverage
+```
+
+The test suite includes **380 tests**.
 
 ### Project Structure
 

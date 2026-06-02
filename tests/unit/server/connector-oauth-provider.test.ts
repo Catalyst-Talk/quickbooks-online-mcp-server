@@ -1,5 +1,7 @@
 import crypto from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, jest } from "@jest/globals";
+import type { AuthorizationParams } from "@modelcontextprotocol/sdk/server/auth/provider.js";
+import type { OAuthClientInformationFull } from "@modelcontextprotocol/sdk/shared/auth.js";
 
 const buildQuickBooksAuthorizationUrlMock = jest.fn<
   (_input: { state: string; redirectUri?: string }) => string
@@ -73,6 +75,29 @@ const connectorAuthStoreMock = {
   getActiveQuickBooksConnection: getActiveQuickBooksConnectionMock,
 };
 
+const oauthClient: OAuthClientInformationFull = {
+  client_id: "claude-client",
+  redirect_uris: ["https://claude.example.com/oauth/callback"],
+  token_endpoint_auth_method: "none",
+  grant_types: ["authorization_code", "refresh_token"],
+  response_types: ["code"],
+  client_id_issued_at: 123,
+};
+
+const authorizeParams: AuthorizationParams = {
+  redirectUri: "https://claude.example.com/oauth/callback",
+  state: "claude-state",
+  codeChallenge: "pkce-challenge",
+  resource: new URL("https://quickbooks.example.com/mcp"),
+};
+
+type QuickBooksCallbackRequest = Parameters<
+  typeof import("../../../src/server/connector-oauth-provider").handleQuickBooksOAuthCallback
+>[0];
+type QuickBooksDisconnectRequest = Parameters<
+  typeof import("../../../src/server/connector-oauth-provider").handleQuickBooksDisconnect
+>[0];
+
 jest.unstable_mockModule("../../../src/clients/quickbooks-client", () => ({
   buildQuickBooksAuthorizationUrl: buildQuickBooksAuthorizationUrlMock,
   exchangeQuickBooksCallback: exchangeQuickBooksCallbackMock,
@@ -114,6 +139,22 @@ function createJsonResponse() {
   } as any;
 }
 
+function createQuickBooksCallbackRequest(query: {
+  state: string;
+  code: string;
+  realmId: string;
+}): QuickBooksCallbackRequest {
+  return { query } as unknown as QuickBooksCallbackRequest;
+}
+
+function createAuthenticatedRequest(
+  principalId: string,
+): QuickBooksDisconnectRequest {
+  return {
+    auth: { extra: { principalId } },
+  } as unknown as QuickBooksDisconnectRequest;
+}
+
 function createSignedCookie(principalId: string, secret: string) {
   const signature = crypto
     .createHmac("sha256", secret)
@@ -133,6 +174,9 @@ describe("ConnectorOAuthServerProvider", () => {
     process.env.MCP_PUBLIC_BASE_URL = "https://quickbooks.example.com";
     process.env.MCP_CONNECTOR_COOKIE_SECRET = "test-cookie-secret";
     process.env.QUICKBOOKS_ENVIRONMENT = "sandbox";
+    delete process.env.MCP_QUICKBOOKS_CONNECTION_MODE;
+    delete process.env.MCP_QUICKBOOKS_SHARED_CONNECTION_PRINCIPAL_ID;
+    delete process.env.MCP_QUICKBOOKS_SHARED_CONNECTION_ORG_ID;
 
     createPendingAuthorizationMock.mockResolvedValue("intuit-state");
     getAuthorizationCodeChallengeMock.mockResolvedValue("pkce-challenge");
@@ -183,6 +227,9 @@ describe("ConnectorOAuthServerProvider", () => {
 
   afterEach(() => {
     consoleErrorSpy.mockRestore();
+    delete process.env.MCP_QUICKBOOKS_CONNECTION_MODE;
+    delete process.env.MCP_QUICKBOOKS_SHARED_CONNECTION_PRINCIPAL_ID;
+    delete process.env.MCP_QUICKBOOKS_SHARED_CONNECTION_ORG_ID;
   });
 
   it("proxies OAuth client registration store methods", async () => {
@@ -250,6 +297,181 @@ describe("ConnectorOAuthServerProvider", () => {
     expect(response.redirect).toHaveBeenCalledWith(
       302,
       "https://quickbooks.example.com/oauth",
+    );
+  });
+
+  it("uses an existing shared QuickBooks connection without redirecting to Intuit", async () => {
+    process.env.MCP_QUICKBOOKS_CONNECTION_MODE = "shared";
+    process.env.MCP_QUICKBOOKS_SHARED_CONNECTION_PRINCIPAL_ID =
+      "connector:company-install";
+    getActiveQuickBooksConnectionMock.mockResolvedValueOnce({
+      id: "shared-connection-123",
+      principalId: "connector:company-install",
+      realmId: "realm-123",
+      environment: "sandbox",
+      refreshTokenSecretId: "secret-123",
+      scopes: ["com.intuit.quickbooks.accounting"],
+      status: "active",
+      companyName: "Acme Corp",
+    });
+    const provider = new ConnectorOAuthServerProvider();
+    const response = createAuthorizeResponse();
+
+    await provider.authorize(oauthClient, authorizeParams, response);
+
+    expect(getActiveQuickBooksConnectionMock).toHaveBeenCalledWith(
+      "connector:company-install",
+    );
+    expect(createAuthorizationCodeMock).toHaveBeenCalledWith({
+      clientId: "claude-client",
+      principalId: "connector:test-principal",
+      redirectUri: "https://claude.example.com/oauth/callback",
+      codeChallenge: "pkce-challenge",
+      scope: "mcp mcp:read",
+      resource: "https://quickbooks.example.com/mcp",
+      quickbooksConnectionId: "shared-connection-123",
+    });
+    expect(writeAuditEventMock).toHaveBeenCalledWith({
+      principalId: "connector:test-principal",
+      connectionId: "shared-connection-123",
+      realmId: "realm-123",
+      toolName: "oauth_authorize",
+      actionType: "read",
+      decision: "allowed",
+      outcome: "success",
+      metadata: {
+        connectionMode: "shared",
+        connectionOwnerPrincipalId: "connector:company-install",
+      },
+    });
+    expect(createPendingAuthorizationMock).not.toHaveBeenCalled();
+    expect(buildQuickBooksAuthorizationUrlMock).not.toHaveBeenCalled();
+    expect(response.redirect).toHaveBeenCalledWith(
+      302,
+      "https://claude.example.com/oauth/callback?code=authorization-code&state=claude-state",
+    );
+  });
+
+  it("falls through to Intuit OAuth when shared mode has no company connection", async () => {
+    process.env.MCP_QUICKBOOKS_CONNECTION_MODE = "shared";
+    process.env.MCP_QUICKBOOKS_SHARED_CONNECTION_ORG_ID = "acme";
+    const provider = new ConnectorOAuthServerProvider();
+    const response = createAuthorizeResponse();
+
+    await provider.authorize(oauthClient, authorizeParams, response);
+
+    expect(getActiveQuickBooksConnectionMock).toHaveBeenCalledWith(
+      "connector:shared-quickbooks-installation:acme",
+    );
+    expect(createPendingAuthorizationMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        principalId: "connector:test-principal",
+      }),
+    );
+    expect(response.redirect).toHaveBeenCalledWith(
+      302,
+      "https://quickbooks.example.com/oauth",
+    );
+  });
+
+  it("lets an admin install the shared QuickBooks company once before members reuse it", async () => {
+    process.env.MCP_QUICKBOOKS_CONNECTION_MODE = "shared";
+    process.env.MCP_QUICKBOOKS_SHARED_CONNECTION_ORG_ID = "acme";
+    const provider = new ConnectorOAuthServerProvider();
+    const adminAuthorizeResponse = createAuthorizeResponse();
+
+    await provider.authorize(oauthClient, authorizeParams, adminAuthorizeResponse);
+
+    expect(getActiveQuickBooksConnectionMock).toHaveBeenCalledWith(
+      "connector:shared-quickbooks-installation:acme",
+    );
+    expect(createPendingAuthorizationMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        principalId: "connector:test-principal",
+        clientId: "claude-client",
+        requestedScope: "mcp mcp:read",
+      }),
+    );
+    expect(adminAuthorizeResponse.redirect).toHaveBeenCalledWith(
+      302,
+      "https://quickbooks.example.com/oauth",
+    );
+
+    storeQuickBooksConnectionMock.mockResolvedValueOnce({
+      id: "shared-connection-123",
+      principalId: "connector:shared-quickbooks-installation:acme",
+      realmId: "realm-123",
+      environment: "sandbox",
+      refreshTokenSecretId: "secret-123",
+      scopes: ["com.intuit.quickbooks.accounting"],
+      status: "active",
+      companyName: "Acme Corp",
+    });
+    createAuthorizationCodeMock.mockResolvedValueOnce("admin-authorization-code");
+    const callbackResponse = createJsonResponse();
+    await handleQuickBooksOAuthCallback(
+      createQuickBooksCallbackRequest({
+        state: "quickbooks-state",
+        code: "quickbooks-code",
+        realmId: "realm-123",
+      }),
+      callbackResponse,
+    );
+
+    expect(storeQuickBooksConnectionMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        principalId: "connector:shared-quickbooks-installation:acme",
+      }),
+    );
+    expect(createAuthorizationCodeMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        principalId: "connector:test-principal",
+        quickbooksConnectionId: "shared-connection-123",
+      }),
+    );
+    expect(callbackResponse.redirect).toHaveBeenCalledWith(
+      302,
+      "https://claude.example.com/oauth/callback?code=admin-authorization-code&state=claude-state",
+    );
+
+    getActiveQuickBooksConnectionMock.mockResolvedValueOnce({
+      id: "shared-connection-123",
+      principalId: "connector:shared-quickbooks-installation:acme",
+      realmId: "realm-123",
+      environment: "sandbox",
+      refreshTokenSecretId: "secret-123",
+      scopes: ["com.intuit.quickbooks.accounting"],
+      status: "active",
+      companyName: "Acme Corp",
+    });
+    createAuthorizationCodeMock.mockResolvedValueOnce("member-authorization-code");
+    const memberAuthorizeResponse = createAuthorizeResponse(
+      createSignedCookie("connector:member-principal", "test-cookie-secret"),
+    );
+
+    await provider.authorize(
+      oauthClient,
+      {
+        ...authorizeParams,
+        state: "member-state",
+      },
+      memberAuthorizeResponse,
+    );
+
+    expect(createPendingAuthorizationMock).toHaveBeenCalledTimes(1);
+    expect(buildQuickBooksAuthorizationUrlMock).toHaveBeenCalledTimes(1);
+    expect(createAuthorizationCodeMock).toHaveBeenLastCalledWith({
+      clientId: "claude-client",
+      principalId: "connector:member-principal",
+      redirectUri: "https://claude.example.com/oauth/callback",
+      codeChallenge: "pkce-challenge",
+      scope: "mcp mcp:read",
+      resource: "https://quickbooks.example.com/mcp",
+      quickbooksConnectionId: "shared-connection-123",
+    });
+    expect(memberAuthorizeResponse.redirect).toHaveBeenCalledWith(
+      302,
+      "https://claude.example.com/oauth/callback?code=member-authorization-code&state=member-state",
     );
   });
 
@@ -426,14 +648,16 @@ describe("ConnectorOAuthServerProvider", () => {
     connectorAuthStoreMock.consumePendingAuthorization.mockResolvedValueOnce(null);
     const response = createJsonResponse();
 
+    const callbackRequest: unknown = {
+      query: {
+        state: "quickbooks-state",
+        code: "quickbooks-code",
+        realmId: "realm-123",
+      },
+    };
+
     await handleQuickBooksOAuthCallback(
-      {
-        query: {
-          state: "quickbooks-state",
-          code: "quickbooks-code",
-          realmId: "realm-123",
-        },
-      } as any,
+      callbackRequest as Parameters<typeof handleQuickBooksOAuthCallback>[0],
       response,
     );
 
@@ -447,14 +671,16 @@ describe("ConnectorOAuthServerProvider", () => {
     exchangeQuickBooksCallbackMock.mockResolvedValueOnce({});
     const response = createJsonResponse();
 
+    const callbackRequest: unknown = {
+      query: {
+        state: "quickbooks-state",
+        code: "quickbooks-code",
+        realmId: "realm-123",
+      },
+    };
+
     await handleQuickBooksOAuthCallback(
-      {
-        query: {
-          state: "quickbooks-state",
-          code: "quickbooks-code",
-          realmId: "realm-123",
-        },
-      } as any,
+      callbackRequest as Parameters<typeof handleQuickBooksOAuthCallback>[0],
       response,
     );
 
@@ -597,6 +823,54 @@ describe("ConnectorOAuthServerProvider", () => {
     expect(response.redirect).toHaveBeenCalledWith(
       302,
       "https://claude.example.com/oauth/callback?code=authorization-code&state=claude-state",
+    );
+  });
+
+  it("stores QuickBooks callback connections under the shared company owner", async () => {
+    process.env.MCP_QUICKBOOKS_CONNECTION_MODE = "shared";
+    process.env.MCP_QUICKBOOKS_SHARED_CONNECTION_PRINCIPAL_ID =
+      "connector:company-install";
+    storeQuickBooksConnectionMock.mockResolvedValueOnce({
+      id: "shared-connection-123",
+      principalId: "connector:company-install",
+      realmId: "realm-123",
+      environment: "sandbox",
+      refreshTokenSecretId: "secret-123",
+      scopes: ["com.intuit.quickbooks.accounting"],
+      status: "active",
+      companyName: "Acme Corp",
+    });
+    const response = createJsonResponse();
+
+    await handleQuickBooksOAuthCallback(
+      createQuickBooksCallbackRequest({
+        state: "quickbooks-state",
+        code: "quickbooks-code",
+        realmId: "realm-123",
+      }),
+      response,
+    );
+
+    expect(storeQuickBooksConnectionMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        principalId: "connector:company-install",
+      }),
+    );
+    expect(createAuthorizationCodeMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        principalId: "connector:test-principal",
+        quickbooksConnectionId: "shared-connection-123",
+      }),
+    );
+    expect(writeAuditEventMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        principalId: "connector:test-principal",
+        connectionId: "shared-connection-123",
+        metadata: {
+          connectionMode: "shared",
+          connectionOwnerPrincipalId: "connector:company-install",
+        },
+      }),
     );
   });
 
@@ -1125,7 +1399,7 @@ describe("ConnectorOAuthServerProvider", () => {
     const response = createJsonResponse();
 
     await handleQuickBooksDisconnect(
-      { auth: { extra: { principalId: "connector:test-principal" } } } as any,
+      createAuthenticatedRequest("connector:test-principal"),
       response,
     );
 
@@ -1198,6 +1472,25 @@ describe("ConnectorOAuthServerProvider", () => {
     });
     expect(response.status).toHaveBeenCalledWith(200);
     expect(response.json).toHaveBeenCalledWith({ disconnected: true });
+  });
+
+  it("blocks shared QuickBooks disconnects without operator intervention", async () => {
+    process.env.MCP_QUICKBOOKS_CONNECTION_MODE = "shared";
+    process.env.MCP_QUICKBOOKS_SHARED_CONNECTION_ORG_ID = "acme";
+    const response = createJsonResponse();
+
+    await handleQuickBooksDisconnect(
+      { auth: { extra: { principalId: "connector:test-principal" } } } as any,
+      response,
+    );
+
+    expect(response.status).toHaveBeenCalledWith(403);
+    expect(response.json).toHaveBeenCalledWith({
+      error:
+        "Shared QuickBooks connections must be disconnected by a server operator",
+    });
+    expect(getActiveQuickBooksConnectionMock).not.toHaveBeenCalled();
+    expect(updateConnectionStatusMock).not.toHaveBeenCalled();
   });
 
   it("redirects QuickBooks start requests into the local authorize endpoint", async () => {

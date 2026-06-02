@@ -564,6 +564,22 @@ export class ConnectorAuthStore {
     return row ? mapConnectionRow(row) : null;
   }
 
+  async getQuickBooksConnectionById(
+    connectionId: string,
+  ): Promise<StoredQuickBooksConnection | null> {
+    const row = await queryOne<QuickBooksConnectionRow>(
+      `
+        select id, principal_id, realm_id, environment, refresh_token_secret_id, scopes, status, company_name
+        from mcp_private.connector_quickbooks_connections
+        where id = $1::uuid
+          and status = 'active'
+      `,
+      [connectionId],
+    );
+
+    return row ? mapConnectionRow(row) : null;
+  }
+
   async getRefreshToken(secretId: string): Promise<string> {
     const row = await queryOne<{ decrypted_secret: string }>(
       `

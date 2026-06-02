@@ -16,7 +16,7 @@
     "lint:fix": "eslint --fix",
     "lint": "eslint .",
     "auth": "node dist/auth-server.js",
-    "test": "NODE_OPTIONS='--experimental-vm-modules' jest",
+    "test": "NODE_OPTIONS='--experimental-vm-modules' jest --coverage=false",
     "test:watch": "NODE_OPTIONS='--experimental-vm-modules' jest --watch",
     "test:coverage": "NODE_OPTIONS='--experimental-vm-modules' jest --coverage"
   },

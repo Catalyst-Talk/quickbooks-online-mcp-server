@@ -54,6 +54,18 @@ function requireScope(scope: "mcp:read" | "mcp:write") {
   };
 }
 
+function getMcpDiscoveryMetadata(): {
+  name: string;
+  description: string;
+  endpoint: string;
+} {
+  return {
+    name: "QuickBooks Online MCP Server",
+    description: "Model Context Protocol server for QuickBooks Online integration",
+    endpoint: new URL("/mcp", getPublicBaseUrl()).toString(),
+  };
+}
+
 function createApp(): express.Express {
   const instance = express();
 
@@ -72,6 +84,10 @@ function createApp(): express.Express {
 
   instance.get(["/health", "/api/health"], (_req, res) => {
     res.status(200).type("text/plain").send("ok");
+  });
+
+  instance.get(["/.well-known/mcp.json", "/api/mcp-discovery"], (_req, res) => {
+    res.status(200).json(getMcpDiscoveryMetadata());
   });
 
   if (isConnectorAuthMode()) {
@@ -149,11 +165,11 @@ function createApp(): express.Express {
       asyncHandler(handleQuickBooksDisconnect),
     );
 
-    instance.all(["/mcp", "/api/mcp"], bearerAuth, (req, res) => {
+    instance.all(["/", "/mcp", "/api/mcp"], bearerAuth, (req, res) => {
       void handleStreamableHttpRequest(req, res, registerAllTools);
     });
   } else {
-    instance.all(["/mcp", "/api/mcp"], (req, res) => {
+    instance.all(["/", "/mcp", "/api/mcp"], (req, res) => {
       void handleStreamableHttpRequest(req, res, registerAllTools);
     });
   }

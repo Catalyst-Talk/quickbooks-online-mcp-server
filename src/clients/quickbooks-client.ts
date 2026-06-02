@@ -11,6 +11,7 @@ import {
   getCurrentAccessToken,
   getOptionalAccessToken,
 } from "./auth-context.js";
+import { getQuickBooksConnectionOwnerPrincipalId } from "./quickbooks-connection-mode.js";
 import { connectorAuthStore } from "../storage/connector-auth-store.js";
 
 dotenv.config();
@@ -429,9 +430,16 @@ async function getConnectorQuickBooksClient(): Promise<QuickBooks> {
   if (!principalId) {
     throw new Error("No authenticated connector principal in request context");
   }
+  const connectionOwnerPrincipalId =
+    getQuickBooksConnectionOwnerPrincipalId(principalId);
 
-  const connection =
-    await connectorAuthStore.getActiveQuickBooksConnection(principalId);
+  const connection = authContext?.quickBooksConnectionId
+    ? await connectorAuthStore.getQuickBooksConnectionById(
+        authContext.quickBooksConnectionId,
+      )
+    : await connectorAuthStore.getActiveQuickBooksConnection(
+        connectionOwnerPrincipalId,
+      );
   if (!connection) {
     throw new Error("No active QuickBooks connection for current principal");
   }
@@ -520,7 +528,7 @@ async function getConnectorQuickBooksClient(): Promise<QuickBooks> {
               status: "needs_reauth",
             });
             await connectorAuthStore.writeAuditEvent({
-              principalId: connection.principalId,
+              principalId,
               connectionId: connection.id,
               realmId: connection.realmId,
               toolName: "quickbooks_token_refresh",
@@ -528,6 +536,10 @@ async function getConnectorQuickBooksClient(): Promise<QuickBooks> {
               decision: "allowed",
               outcome: "failure",
               errorCode: "needs_reauth",
+              metadata:
+                connection.principalId === principalId
+                  ? undefined
+                  : { connectionOwnerPrincipalId: connection.principalId },
             });
           }
           throw error;
